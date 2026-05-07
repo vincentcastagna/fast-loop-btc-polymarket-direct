@@ -15,6 +15,7 @@ from .config import load_config, load_dotenv, load_wallet_config
 from .http import api_get_json
 from .ledger import (
     count_live_successes_today,
+    get_failed_live_entry_for_market_today,
     has_live_exit_for_market_today,
     get_live_success_for_market_today,
     has_live_success_for_market_today,
@@ -204,7 +205,7 @@ def reconcile_order_result_from_activity(
     attempt_started_at: datetime,
     wait_seconds: float = 2.5,
 ) -> Dict[str, Any]:
-    if not ambiguous_order_error(result):
+    if not (ambiguous_order_error(result) or unresolved_ambiguous_order(result)):
         return result
 
     fill = find_recent_activity_fill(user_address, decision, attempt_started_at, wait_seconds=wait_seconds)
@@ -245,6 +246,47 @@ def filled_cash_amount(result: Dict[str, Any], fallback: float) -> float:
     if amount is None or amount <= 0:
         amount = float(fallback)
     return round(float(amount), 6)
+
+
+def recover_ambiguous_live_entry_from_activity(user_address: str | None, condition_id: str) -> Dict[str, Any] | None:
+    if not user_address or not condition_id:
+        return None
+    failed_record = get_failed_live_entry_for_market_today(condition_id)
+    if not failed_record:
+        return None
+
+    decision = failed_record.get("decision") or {}
+    result = dict(failed_record.get("result") or {})
+    if not (ambiguous_order_error(result) or unresolved_ambiguous_order(result)):
+        return None
+
+    try:
+        attempt_started_at = datetime.fromisoformat(
+            str(failed_record.get("timestamp_utc") or "").replace("Z", "+00:00")
+        )
+    except ValueError:
+        return None
+
+    reconciled = reconcile_order_result_from_activity(
+        user_address,
+        decision,
+        result,
+        attempt_started_at.astimezone(timezone.utc),
+        wait_seconds=0,
+    )
+    if not order_success(reconciled):
+        return None
+
+    reconciliation = dict(reconciled.get("reconciliation") or {})
+    reconciliation["source"] = "exit_guard_scan"
+    reconciled["reconciliation"] = reconciliation
+    record_attempt(decision, reconciled, live=True)
+    return {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "live": True,
+        "decision": decision,
+        "result": reconciled,
+    }
 
 
 def live_quality_skip_reason(config, decision: Dict[str, Any]) -> str | None:
@@ -532,6 +574,8 @@ def monitor_live_exit(config, clob: DirectClob, markets, mode: str, live: bool) 
 
     for market in markets:
         order_record = get_live_success_for_market_today(market.condition_id)
+        if not order_record:
+            order_record = recover_ambiguous_live_entry_from_activity(clob.wallet.funder_address, market.condition_id)
         if not order_record or has_live_exit_for_market_today(market.condition_id):
             continue
 

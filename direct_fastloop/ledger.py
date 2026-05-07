@@ -146,6 +146,37 @@ def get_live_success_for_market_today(condition_id: str) -> Dict[str, Any] | Non
     return None
 
 
+def get_failed_live_entry_for_market_today(condition_id: str) -> Dict[str, Any] | None:
+    if not condition_id or not ORDER_LOG.exists():
+        return None
+    key = today_key()
+    lines = ORDER_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+    for raw in reversed(lines):
+        if not raw.strip():
+            continue
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not record.get("live"):
+            continue
+        if not _is_entry_record(record):
+            continue
+        try:
+            if _local_date_key(record.get("timestamp_utc", "")) != key:
+                continue
+        except ValueError:
+            continue
+        decision = record.get("decision") or {}
+        market = decision.get("market") or {}
+        if market.get("condition_id") != condition_id:
+            continue
+        result = record.get("result") or {}
+        if not _order_result_success(result):
+            return record
+    return None
+
+
 def has_live_exit_for_market_today(condition_id: str) -> bool:
     if not condition_id or not ORDER_LOG.exists():
         return False
