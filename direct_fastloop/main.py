@@ -6,11 +6,13 @@ import sys
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict
+from urllib.parse import urlencode
 
 from py_clob_client_v2.clob_types import OrderType
 
 from .clob_exec import DirectClob
 from .config import load_config, load_dotenv, load_wallet_config
+from .http import api_get_json
 from .ledger import (
     count_live_successes_today,
     has_live_exit_for_market_today,
@@ -82,11 +84,167 @@ def retryable_taker_error(result: Dict[str, Any]) -> bool:
     )
 
 
+def ambiguous_order_error(result: Dict[str, Any]) -> bool:
+    if order_success(result):
+        return False
+    text = json.dumps(result, default=_json_default).lower()
+    return any(
+        needle in text
+        for needle in (
+            "request exception",
+            "read operation timed out",
+            "timed out",
+            "timeout",
+            "sslwantreaderror",
+            "connection aborted",
+            "connection reset",
+            "remote end closed",
+        )
+    )
+
+
+def unresolved_ambiguous_order(result: Dict[str, Any]) -> bool:
+    reconciliation = result.get("reconciliation") or {}
+    return bool(reconciliation.get("checked") and not reconciliation.get("found"))
+
+
 def _float_or_none(value: Any) -> float | None:
     try:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _expected_outcome_for_side(side: str | None) -> str | None:
+    if side == "yes":
+        return "Up"
+    if side == "no":
+        return "Down"
+    return None
+
+
+def _activity_fill_payload(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "timestamp": row.get("timestamp"),
+        "type": row.get("type"),
+        "side": row.get("side"),
+        "outcome": row.get("outcome"),
+        "asset": row.get("asset"),
+        "conditionId": row.get("conditionId"),
+        "eventSlug": row.get("eventSlug"),
+        "marketSlug": row.get("marketSlug"),
+        "title": row.get("title"),
+        "size": _float_or_none(row.get("size")),
+        "usdcSize": _float_or_none(row.get("usdcSize")),
+    }
+
+
+def _activity_row_matches_fill(row: Dict[str, Any], decision: Dict[str, Any], min_epoch: int) -> bool:
+    try:
+        ts = int(row.get("timestamp") or 0)
+    except (TypeError, ValueError):
+        return False
+    if ts < min_epoch:
+        return False
+    if str(row.get("type") or "").upper() != "TRADE":
+        return False
+    if str(row.get("side") or "").upper() != "BUY":
+        return False
+
+    market = decision.get("market") or {}
+    condition_id = market.get("condition_id")
+    slug = market.get("slug")
+    token_id = decision.get("token_id")
+    same_market = any(
+        [
+            condition_id and row.get("conditionId") == condition_id,
+            slug and (row.get("eventSlug") == slug or row.get("marketSlug") == slug),
+            token_id and str(row.get("asset") or "") == str(token_id),
+        ]
+    )
+    if not same_market:
+        return False
+
+    expected_outcome = _expected_outcome_for_side(str(decision.get("side") or ""))
+    row_outcome = row.get("outcome")
+    if expected_outcome and row_outcome and row_outcome != expected_outcome:
+        return False
+    return True
+
+
+def find_recent_activity_fill(
+    user_address: str | None,
+    decision: Dict[str, Any],
+    attempt_started_at: datetime,
+    wait_seconds: float = 2.5,
+) -> Dict[str, Any] | None:
+    if not user_address:
+        return None
+    min_epoch = int(attempt_started_at.timestamp()) - 5
+    deadline = time.monotonic() + max(float(wait_seconds), 0.0)
+    params = urlencode({"user": user_address, "limit": 100, "offset": 0})
+    url = f"https://data-api.polymarket.com/activity?{params}"
+
+    while True:
+        rows = api_get_json(url, timeout=10)
+        if isinstance(rows, list):
+            matches = [row for row in rows if _activity_row_matches_fill(row, decision, min_epoch)]
+            if matches:
+                matches.sort(key=lambda row: int(row.get("timestamp") or 0), reverse=True)
+                return _activity_fill_payload(matches[0])
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.5)
+
+
+def reconcile_order_result_from_activity(
+    user_address: str | None,
+    decision: Dict[str, Any],
+    result: Dict[str, Any],
+    attempt_started_at: datetime,
+    wait_seconds: float = 2.5,
+) -> Dict[str, Any]:
+    if not ambiguous_order_error(result):
+        return result
+
+    fill = find_recent_activity_fill(user_address, decision, attempt_started_at, wait_seconds=wait_seconds)
+    if not fill:
+        result["reconciliation"] = {
+            "checked": True,
+            "found": False,
+            "reason": "ambiguous_error_no_activity_fill",
+        }
+        return result
+
+    original_error = dict(result)
+    reconciled = dict(result)
+    for key in ("error", "exception_type", "status_code", "error_message"):
+        reconciled.pop(key, None)
+    reconciled.update(
+        {
+            "success": True,
+            "status": "matched",
+            "reconciled_from_activity": True,
+            "reconciliation": {"checked": True, "found": True},
+            "activity_fill": fill,
+            "original_error": original_error,
+        }
+    )
+    if fill.get("size") is not None:
+        reconciled["takingAmount"] = str(fill["size"])
+    if fill.get("usdcSize") is not None:
+        reconciled["makingAmount"] = str(fill["usdcSize"])
+    return reconciled
+
+
+def filled_cash_amount(result: Dict[str, Any], fallback: float) -> float:
+    fill = result.get("activity_fill") or {}
+    amount = _float_or_none(result.get("makingAmount"))
+    if amount is None:
+        amount = _float_or_none(fill.get("usdcSize"))
+    if amount is None or amount <= 0:
+        amount = float(fallback)
+    return round(float(amount), 6)
 
 
 def live_quality_skip_reason(config, decision: Dict[str, Any]) -> str | None:
@@ -740,11 +898,18 @@ def run_once(args: argparse.Namespace) -> int:
         return 0
 
     attempt_results = []
+    attempt_started_at = datetime.now(timezone.utc)
     try:
         result_dict = place_live_order(clob, config, decision, books, mode)
     except Exception as exc:
         result_dict = normalize_order_exception(exc)
     result_dict["attempt"] = 1
+    result_dict = reconcile_order_result_from_activity(
+        wallet.funder_address,
+        decision_dict,
+        result_dict,
+        attempt_started_at,
+    )
     record_attempt(decision_dict, result_dict, live=True)
     attempt_results.append({"decision": decision_dict, "result": result_dict})
     success = order_success(result_dict)
@@ -754,6 +919,7 @@ def run_once(args: argparse.Namespace) -> int:
         and mode == "taker"
         and decision.order_type in (OrderType.FAK, OrderType.FOK)
         and retryable_taker_error(result_dict)
+        and not unresolved_ambiguous_order(result_dict)
     ):
         time.sleep(1)
         retry_decision, retry_decision_dict, retry_books, retry_meta = refreshed_live_taker_candidate(
@@ -764,11 +930,18 @@ def run_once(args: argparse.Namespace) -> int:
             result_dict["retry"] = {"status": "skipped", **retry_meta}
         else:
             record_decision(retry_decision_dict, live=live, status="candidate_retry")
+            retry_started_at = datetime.now(timezone.utc)
             try:
                 retry_result = place_live_order(clob, config, retry_decision, retry_books, mode)
             except Exception as exc:
                 retry_result = normalize_order_exception(exc)
             retry_result["attempt"] = 2
+            retry_result = reconcile_order_result_from_activity(
+                wallet.funder_address,
+                retry_decision_dict,
+                retry_result,
+                retry_started_at,
+            )
             record_attempt(retry_decision_dict, retry_result, live=True)
             attempt_results.append({"decision": retry_decision_dict, "result": retry_result})
             if order_success(retry_result):
@@ -776,9 +949,14 @@ def run_once(args: argparse.Namespace) -> int:
                 decision_dict = retry_decision_dict
                 result_dict = retry_result
                 success = True
+    elif unresolved_ambiguous_order(result_dict):
+        result_dict["retry"] = {
+            "status": "skipped",
+            "reason": "ambiguous order state unresolved; avoiding duplicate live order",
+        }
 
     if success:
-        mark_live_success(decision.amount_usd)
+        mark_live_success(filled_cash_amount(result_dict, decision.amount_usd))
 
     if args.wait_cancel and mode == "maker":
         order_id = result_dict.get("orderID") or result_dict.get("order_id") or result_dict.get("id")

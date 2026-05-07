@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 from .config import BotConfig
 from .http import api_get_json
 from .ledger import load_daily_state, save_daily_state
-from .markets import WINDOW_SECONDS
+from .markets import ASSET_PATTERNS, WINDOW_SECONDS
 
 
 @dataclass
@@ -54,7 +54,11 @@ def _fast_market_start_epoch(slug: Optional[str]) -> Optional[int]:
         return None
 
 
-def _daily_btc_cash_snapshot(config: BotConfig, user_address: str) -> dict:
+def _asset_title_patterns(asset: str) -> list[str]:
+    return ASSET_PATTERNS.get(asset.upper(), [f"{asset.lower()} up or down"])
+
+
+def _daily_asset_cash_snapshot(config: BotConfig, user_address: str) -> dict:
     params = urlencode({"user": user_address, "limit": 500, "offset": 0})
     rows = api_get_json(f"https://data-api.polymarket.com/activity?{params}", timeout=20)
     if not isinstance(rows, list):
@@ -74,8 +78,8 @@ def _daily_btc_cash_snapshot(config: BotConfig, user_address: str) -> dict:
             continue
         if ts < start_epoch:
             continue
-        title = str(row.get("title") or "")
-        if "Bitcoin Up or Down" not in title:
+        title = str(row.get("title") or "").lower()
+        if not any(pattern in title for pattern in _asset_title_patterns(config.asset)):
             continue
         slug = str(row.get("eventSlug") or row.get("marketSlug") or title)
         bucket = by_market.setdefault(slug, {"buy": 0.0, "redeem": 0.0})
@@ -103,23 +107,34 @@ def _daily_btc_cash_snapshot(config: BotConfig, user_address: str) -> dict:
         "losses": losses,
         "cash_in": round(cash_in, 6),
         "cash_out": round(cash_out, 6),
+        "trade_count": sum(1 for bucket in by_market.values() if bucket["buy"] > 0),
     }
+
+
+def _daily_btc_cash_snapshot(config: BotConfig, user_address: str) -> dict:
+    return _daily_asset_cash_snapshot(config, user_address)
 
 
 def check_and_size(config: BotConfig, requested_usd: float, user_address: Optional[str] = None) -> RiskResult:
     state = load_daily_state()
     spent = float(state.get("spent") or 0)
     trades = int(state.get("trades") or 0)
-    if trades >= config.direct_max_daily_trades:
-        return RiskResult(False, "daily trade limit reached", 0.0, spent, trades)
 
     cash_pnl_today = None
     losses_today = 0
-    if user_address and (config.direct_max_daily_losses > 0 or config.direct_daily_stop_loss < 0):
+    if user_address:
         try:
-            snapshot = _daily_btc_cash_snapshot(config, user_address)
+            snapshot = _daily_asset_cash_snapshot(config, user_address)
         except RuntimeError as exc:
             return RiskResult(False, f"live loss guard unavailable: {exc}", 0.0, spent, trades)
+        synced_spent = max(spent, float(snapshot["cash_out"]))
+        synced_trades = max(trades, int(snapshot["trade_count"]))
+        if synced_spent != spent or synced_trades != trades:
+            state["spent"] = round(synced_spent, 6)
+            state["trades"] = synced_trades
+            save_daily_state(state)
+            spent = synced_spent
+            trades = synced_trades
         cash_pnl_today = float(snapshot["cash_pnl"])
         losses_today = int(snapshot["losses"])
         if config.direct_max_daily_losses > 0 and losses_today >= config.direct_max_daily_losses:
@@ -142,6 +157,9 @@ def check_and_size(config: BotConfig, requested_usd: float, user_address: Option
                 losses_today,
                 cash_pnl_today,
             )
+
+    if trades >= config.direct_max_daily_trades:
+        return RiskResult(False, "daily trade limit reached", 0.0, spent, trades, losses_today, cash_pnl_today)
 
     remaining = float(config.direct_daily_budget) - spent
     if remaining <= 0:
