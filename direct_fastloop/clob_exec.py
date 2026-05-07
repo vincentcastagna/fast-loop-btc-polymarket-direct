@@ -19,6 +19,7 @@ from .config import WalletConfig
 
 
 BUY = "BUY"
+SELL = "SELL"
 
 
 @dataclass
@@ -162,6 +163,22 @@ class DirectClob:
             price=round(float(price_limit), 4) if price_limit else 0,
             order_type=order_type,
             user_usdc_balance=float(user_usdc_balance or 0),
+        )
+        return self.client.create_and_post_market_order(args, order_type=order_type)
+
+    def place_taker_sell(
+        self,
+        token_id: str,
+        shares: float,
+        order_type: str = OrderType.FAK,
+        price_limit: float = 0,
+    ) -> Dict[str, Any]:
+        args = MarketOrderArgsV2(
+            token_id=token_id,
+            amount=round(float(shares), 5),
+            side=SELL,
+            price=round(float(price_limit), 4) if price_limit else 0,
+            order_type=order_type,
         )
         return self.client.create_and_post_market_order(args, order_type=order_type)
 

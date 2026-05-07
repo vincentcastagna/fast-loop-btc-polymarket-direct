@@ -13,6 +13,7 @@ from .clob_exec import DirectClob
 from .config import load_config, load_dotenv, load_wallet_config
 from .ledger import (
     count_live_successes_today,
+    has_live_exit_for_market_today,
     get_live_success_for_market_today,
     has_live_success_for_market_today,
     record_attempt,
@@ -22,7 +23,7 @@ from .ledger import (
 from .markets import choose_live_market, discover_fast_markets
 from .risk import check_and_size, mark_live_success
 from .signal import get_binance_momentum
-from .strategy import evaluate_trade
+from .strategy import evaluate_trade, polymarket_fee_per_share
 
 
 def _json_default(value: Any) -> str:
@@ -218,6 +219,225 @@ def _record_shadow_exit_snapshot(config, market, books, live: bool) -> None:
         live=live,
         status="shadow_exit_snapshot",
     )
+
+
+def _exit_bid_ask_for_side(books, side: str) -> tuple[float | None, float | None]:
+    if side == "yes":
+        return books.yes.best_bid, books.yes.best_ask
+    if side == "no" and books.no:
+        return books.no.best_bid, books.no.best_ask
+    return None, None
+
+
+def _token_id_for_side(market, side: str) -> str | None:
+    if side == "yes":
+        return market.yes_token_id
+    if side == "no":
+        return market.no_token_id
+    return None
+
+
+def exit_badness_reasons(config, held_side: str, decision: Dict[str, Any]) -> list[str]:
+    market = decision.get("market") or {}
+    momentum = decision.get("momentum") or {}
+    skip_reason = str(decision.get("skip_reason") or "")
+    bad_reasons: list[str] = []
+
+    strategy_bad_reasons = {
+        "weak signal score",
+        "close location too weak",
+        "choppy move",
+        "short-term reversal",
+        "late reversal risk",
+        "side disabled",
+    }
+    if skip_reason in strategy_bad_reasons:
+        bad_reasons.append(f"strategy:{skip_reason}")
+
+    signal_score = _float_or_none(decision.get("signal_score"))
+    close_location = _float_or_none(momentum.get("close_location"))
+    trend_ratio = _float_or_none(momentum.get("trend_ratio"))
+    recent_move = _float_or_none(momentum.get("recent_move_pct"))
+    one_min_move = _float_or_none(momentum.get("one_min_move_pct"))
+    momentum_side = market.get("momentum_side")
+    micro_side = market.get("micro_side")
+
+    if signal_score is not None and signal_score < 0.35:
+        bad_reasons.append(f"signal_score<{0.35:.2f}")
+    if close_location is not None and close_location < 0.75:
+        bad_reasons.append(f"close_location<{0.75:.2f}")
+    if trend_ratio is not None and trend_ratio <= 0.50:
+        bad_reasons.append("trend_ratio<=0.50")
+    if momentum_side and momentum_side != held_side:
+        bad_reasons.append(f"momentum_flip:{momentum_side}")
+    if micro_side and micro_side != held_side:
+        bad_reasons.append(f"micro_flip:{micro_side}")
+
+    min_opposite = max(float(config.direct_live_min_recent_move_pct) / 2.0, 0.005)
+    if held_side == "yes":
+        if recent_move is not None and recent_move <= -min_opposite:
+            bad_reasons.append(f"recent_move_opposite:{recent_move:.4f}")
+        if one_min_move is not None and one_min_move <= -min_opposite:
+            bad_reasons.append(f"one_min_opposite:{one_min_move:.4f}")
+    elif held_side == "no":
+        if recent_move is not None and recent_move >= min_opposite:
+            bad_reasons.append(f"recent_move_opposite:{recent_move:.4f}")
+        if one_min_move is not None and one_min_move >= min_opposite:
+            bad_reasons.append(f"one_min_opposite:{one_min_move:.4f}")
+
+    return bad_reasons
+
+
+def build_exit_decision(config, market, books, order_record: Dict[str, Any], current_decision: Dict[str, Any], fee_rate_bps: int) -> Dict[str, Any]:
+    execution = _order_execution_snapshot(order_record)
+    held_side = str(execution.get("side") or "")
+    current_bid, current_ask = _exit_bid_ask_for_side(books, held_side)
+    shares = _float_or_none(execution.get("actual_shares"))
+    cost = _float_or_none(execution.get("actual_cost"))
+    remaining = market.remaining_seconds()
+    fee_per_share = polymarket_fee_per_share(current_bid, fee_rate_bps) if current_bid is not None else 0.0
+    exit_value = None
+    exit_pnl = None
+    if shares is not None and cost is not None and current_bid is not None:
+        exit_value = shares * max(float(current_bid) - fee_per_share, 0.0)
+        exit_pnl = exit_value - cost
+
+    bad_reasons = exit_badness_reasons(config, held_side, current_decision)
+    token_id = _token_id_for_side(market, held_side)
+    min_bid = float(config.direct_live_exit_min_bid)
+    slippage = float(config.direct_live_exit_slippage_cents) / 100.0
+    limit_price = None
+    if current_bid is not None:
+        limit_price = max(round(float(current_bid) - slippage, 4), min_bid)
+
+    should_exit = True
+    reason = None
+    if not token_id:
+        should_exit = False
+        reason = "held token unavailable"
+    elif config.direct_live_exit_yes_only and held_side != "yes":
+        should_exit = False
+        reason = "exit guard supports YES only"
+    elif shares is None or shares <= 0 or cost is None or cost <= 0:
+        should_exit = False
+        reason = "position size unavailable"
+    elif current_bid is None:
+        should_exit = False
+        reason = "no exit bid"
+    elif current_bid < min_bid:
+        should_exit = False
+        reason = f"exit bid below minimum ({current_bid})"
+    elif remaining > config.direct_live_exit_max_remaining_seconds:
+        should_exit = False
+        reason = f"too early for exit guard ({remaining:.1f}s)"
+    elif remaining < config.direct_live_exit_min_remaining_seconds:
+        should_exit = False
+        reason = f"too late for controlled exit ({remaining:.1f}s)"
+    elif exit_pnl is None or exit_pnl > config.direct_live_exit_max_unrealized_pnl:
+        should_exit = False
+        reason = f"loss not large enough ({exit_pnl})"
+    elif len(bad_reasons) < config.direct_live_exit_min_bad_reasons:
+        should_exit = False
+        reason = f"exit confluence too weak ({len(bad_reasons)}/{config.direct_live_exit_min_bad_reasons})"
+
+    return {
+        "action": "exit",
+        "should_exit": should_exit,
+        "skip_reason": reason,
+        "side": held_side,
+        "token_id": token_id,
+        "shares": shares,
+        "order_type": "FAK",
+        "limit_price": limit_price,
+        "position": execution,
+        "current_bid": current_bid,
+        "current_ask": current_ask,
+        "fee_rate_bps": fee_rate_bps,
+        "fee_per_share": fee_per_share,
+        "exit_value_at_bid": exit_value,
+        "exit_pnl_at_bid": exit_pnl,
+        "bad_reasons": bad_reasons,
+        "current_signal": current_decision,
+        "market": {
+            "question": market.question,
+            "slug": market.slug,
+            "condition_id": market.condition_id,
+            "end_time_utc": market.end_time.isoformat(),
+            "remaining_seconds": round(remaining, 3),
+        },
+    }
+
+
+def monitor_live_exit(config, clob: DirectClob, markets, mode: str, live: bool) -> Dict[str, Any] | None:
+    if not live or mode != "taker" or not config.direct_live_exit_enabled:
+        return None
+
+    for market in markets:
+        order_record = get_live_success_for_market_today(market.condition_id)
+        if not order_record or has_live_exit_for_market_today(market.condition_id):
+            continue
+
+        try:
+            books = clob.get_outcome_books(market.yes_token_id, market.no_token_id)
+        except Exception as exc:
+            payload = {
+                "action": "exit",
+                "should_exit": False,
+                "skip_reason": f"exit orderbook unavailable: {exc}",
+                "market": {"question": market.question, "condition_id": market.condition_id},
+            }
+            record_shadow(payload, live=live, status="exit_hold")
+            return None
+
+        market_yes_price = clob.get_midpoint(market.yes_token_id)
+        momentum = get_binance_momentum(config.asset, config.lookback_minutes)
+        if not momentum:
+            payload = {
+                "action": "exit",
+                "should_exit": False,
+                "skip_reason": "exit signal fetch failed",
+                "market": {"question": market.question, "condition_id": market.condition_id},
+            }
+            record_shadow(payload, live=live, status="exit_hold")
+            return None
+
+        fee_rate = clob.get_fee_rate_bps(market.yes_token_id, config.default_taker_fee_rate_bps)
+        current_decision = evaluate_trade(
+            config,
+            market,
+            books,
+            momentum,
+            fee_rate_bps=fee_rate,
+            mode=mode,
+            market_yes_price=market_yes_price,
+        ).to_dict()
+        exit_decision = build_exit_decision(config, market, books, order_record, current_decision, fee_rate)
+        status = "exit_candidate" if exit_decision["should_exit"] else "exit_hold"
+        record_shadow(exit_decision, live=live, status=status)
+        if not exit_decision["should_exit"]:
+            return None
+
+        if config.direct_live_exit_shadow_only:
+            return {"status": "exit_shadow_candidate", "exit": exit_decision}
+
+        try:
+            result_dict = clob.place_taker_sell(
+                token_id=exit_decision["token_id"],
+                shares=exit_decision["shares"],
+                order_type=OrderType.FAK,
+                price_limit=exit_decision["limit_price"] or 0,
+            )
+            result_dict = normalize_order_result(result_dict)
+        except Exception as exc:
+            result_dict = normalize_order_exception(exc)
+        record_attempt(exit_decision, result_dict, live=True)
+        return {
+            "status": "live_exit_sent" if order_success(result_dict) else "live_exit_error",
+            "exit": exit_decision,
+            "result": result_dict,
+        }
+
+    return None
 
 
 def record_late_shadow_observations(config, wallet, clob: DirectClob, markets, mode: str, live: bool) -> None:
@@ -428,6 +648,11 @@ def run_once(args: argparse.Namespace) -> int:
 
     clob = DirectClob(wallet)
     markets = discover_fast_markets(config.asset, config.window, horizon_slots=args.limit_markets)
+    exit_payload = monitor_live_exit(config, clob, markets, mode, live)
+    if exit_payload:
+        print_json(exit_payload)
+        return 0
+
     record_late_shadow_observations(config, wallet, clob, markets, mode, live)
     market = choose_live_market(markets, config.min_time_remaining, config.max_time_remaining, config.window)
     if not market:

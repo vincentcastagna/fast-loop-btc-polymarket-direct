@@ -139,6 +139,15 @@ class BotConfig:
     direct_shadow_late_min_time_remaining: int
     direct_shadow_late_max_time_remaining: int
     direct_shadow_exit_enabled: bool
+    direct_live_exit_enabled: bool
+    direct_live_exit_shadow_only: bool
+    direct_live_exit_max_remaining_seconds: int
+    direct_live_exit_min_remaining_seconds: int
+    direct_live_exit_max_unrealized_pnl: float
+    direct_live_exit_min_bad_reasons: int
+    direct_live_exit_slippage_cents: float
+    direct_live_exit_min_bid: float
+    direct_live_exit_yes_only: bool
     maker: MakerConfig
 
 
@@ -264,6 +273,15 @@ def load_config(path: Path = CONFIG_PATH) -> BotConfig:
         direct_shadow_late_min_time_remaining=int(payload.get("direct_shadow_late_min_time_remaining", 15)),
         direct_shadow_late_max_time_remaining=int(payload.get("direct_shadow_late_max_time_remaining", 45)),
         direct_shadow_exit_enabled=bool(payload.get("direct_shadow_exit_enabled", False)),
+        direct_live_exit_enabled=bool(payload.get("direct_live_exit_enabled", False)),
+        direct_live_exit_shadow_only=bool(payload.get("direct_live_exit_shadow_only", True)),
+        direct_live_exit_max_remaining_seconds=int(payload.get("direct_live_exit_max_remaining_seconds", 90)),
+        direct_live_exit_min_remaining_seconds=int(payload.get("direct_live_exit_min_remaining_seconds", 15)),
+        direct_live_exit_max_unrealized_pnl=float(payload.get("direct_live_exit_max_unrealized_pnl", -1.25)),
+        direct_live_exit_min_bad_reasons=int(payload.get("direct_live_exit_min_bad_reasons", 2)),
+        direct_live_exit_slippage_cents=float(payload.get("direct_live_exit_slippage_cents", 3.0)),
+        direct_live_exit_min_bid=float(payload.get("direct_live_exit_min_bid", 0.05)),
+        direct_live_exit_yes_only=bool(payload.get("direct_live_exit_yes_only", True)),
         maker=maker,
     )
 

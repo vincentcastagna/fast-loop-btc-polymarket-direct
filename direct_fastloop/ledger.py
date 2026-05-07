@@ -102,6 +102,16 @@ def _order_result_success(result: Dict[str, Any]) -> bool:
     return bool(result.get("orderID") or result.get("order_id") or result.get("id"))
 
 
+def _is_entry_record(record: Dict[str, Any]) -> bool:
+    decision = record.get("decision") or {}
+    return str(decision.get("action") or "entry") == "entry"
+
+
+def _is_exit_record(record: Dict[str, Any]) -> bool:
+    decision = record.get("decision") or {}
+    return str(decision.get("action") or "") == "exit"
+
+
 def has_live_success_for_market_today(condition_id: str) -> bool:
     return get_live_success_for_market_today(condition_id) is not None
 
@@ -119,6 +129,8 @@ def get_live_success_for_market_today(condition_id: str) -> Dict[str, Any] | Non
             continue
         if not record.get("live"):
             continue
+        if not _is_entry_record(record):
+            continue
         try:
             if _local_date_key(record.get("timestamp_utc", "")) != key:
                 continue
@@ -134,6 +146,34 @@ def get_live_success_for_market_today(condition_id: str) -> Dict[str, Any] | Non
     return None
 
 
+def has_live_exit_for_market_today(condition_id: str) -> bool:
+    if not condition_id or not ORDER_LOG.exists():
+        return False
+    key = today_key()
+    for raw in ORDER_LOG.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not raw.strip():
+            continue
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not record.get("live") or not _is_exit_record(record):
+            continue
+        try:
+            if _local_date_key(record.get("timestamp_utc", "")) != key:
+                continue
+        except ValueError:
+            continue
+        decision = record.get("decision") or {}
+        market = decision.get("market") or {}
+        if market.get("condition_id") != condition_id:
+            continue
+        result = record.get("result") or {}
+        if _order_result_success(result):
+            return True
+    return False
+
+
 def count_live_successes_today(side: str | None = None, market_flag: str | None = None) -> int:
     if not ORDER_LOG.exists():
         return 0
@@ -147,6 +187,8 @@ def count_live_successes_today(side: str | None = None, market_flag: str | None 
         except json.JSONDecodeError:
             continue
         if not record.get("live"):
+            continue
+        if not _is_entry_record(record):
             continue
         try:
             if _local_date_key(record.get("timestamp_utc", "")) != key:
