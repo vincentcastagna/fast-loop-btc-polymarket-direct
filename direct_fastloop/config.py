@@ -145,6 +145,14 @@ class BotConfig:
     direct_live_choppy_yes_min_trend_ratio: float
     direct_live_choppy_yes_min_signal_score: float
     direct_live_choppy_yes_min_setup_score: float
+    direct_live_entry_confirmation_enabled: bool
+    direct_live_entry_confirmation_min_wait_seconds: int
+    direct_live_entry_confirmation_min_remaining_seconds: int
+    direct_live_entry_confirmation_max_age_seconds: int
+    direct_live_entry_confirmation_max_price_slippage_cents: float
+    direct_daily_profit_lock_enabled: bool
+    direct_daily_profit_lock_start: float
+    direct_daily_profit_lock_giveback: float
     direct_shadow_late_enabled: bool
     direct_shadow_late_min_time_remaining: int
     direct_shadow_late_max_time_remaining: int
@@ -289,6 +297,22 @@ def load_config(path: Path = CONFIG_PATH) -> BotConfig:
         direct_live_choppy_yes_min_trend_ratio=float(payload.get("direct_live_choppy_yes_min_trend_ratio", 0.50)),
         direct_live_choppy_yes_min_signal_score=float(payload.get("direct_live_choppy_yes_min_signal_score", 0.50)),
         direct_live_choppy_yes_min_setup_score=float(payload.get("direct_live_choppy_yes_min_setup_score", 0.55)),
+        direct_live_entry_confirmation_enabled=bool(payload.get("direct_live_entry_confirmation_enabled", False)),
+        direct_live_entry_confirmation_min_wait_seconds=int(
+            payload.get("direct_live_entry_confirmation_min_wait_seconds", 25)
+        ),
+        direct_live_entry_confirmation_min_remaining_seconds=int(
+            payload.get("direct_live_entry_confirmation_min_remaining_seconds", 95)
+        ),
+        direct_live_entry_confirmation_max_age_seconds=int(
+            payload.get("direct_live_entry_confirmation_max_age_seconds", 130)
+        ),
+        direct_live_entry_confirmation_max_price_slippage_cents=float(
+            payload.get("direct_live_entry_confirmation_max_price_slippage_cents", 3.0)
+        ),
+        direct_daily_profit_lock_enabled=bool(payload.get("direct_daily_profit_lock_enabled", False)),
+        direct_daily_profit_lock_start=float(payload.get("direct_daily_profit_lock_start", 5.0)),
+        direct_daily_profit_lock_giveback=float(payload.get("direct_daily_profit_lock_giveback", 3.5)),
         direct_shadow_late_enabled=bool(payload.get("direct_shadow_late_enabled", False)),
         direct_shadow_late_min_time_remaining=int(payload.get("direct_shadow_late_min_time_remaining", 15)),
         direct_shadow_late_max_time_remaining=int(payload.get("direct_shadow_late_max_time_remaining", 45)),

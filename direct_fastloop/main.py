@@ -14,14 +14,17 @@ from .clob_exec import DirectClob
 from .config import load_config, load_dotenv, load_wallet_config
 from .http import api_get_json
 from .ledger import (
+    clear_entry_confirmation_state,
     count_live_successes_today,
     get_failed_live_entry_for_market_today,
     has_live_exit_for_market_today,
     get_live_success_for_market_today,
     has_live_success_for_market_today,
+    load_entry_confirmation_state,
     record_attempt,
     record_decision,
     record_shadow,
+    save_entry_confirmation_state,
 )
 from .markets import choose_live_market, discover_fast_markets
 from .risk import check_and_size, mark_live_success
@@ -406,6 +409,138 @@ def live_choppy_yes_cap_skip_reason(config, decision: Dict[str, Any]) -> str | N
 
 def live_experiment_cap_skip_reason(config, decision: Dict[str, Any]) -> str | None:
     return live_side_cap_skip_reason(config, decision) or live_choppy_yes_cap_skip_reason(config, decision)
+
+
+def _parse_utc_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _new_entry_confirmation_record(decision: Dict[str, Any], now: datetime) -> Dict[str, Any]:
+    market = decision.get("market") or {}
+    return {
+        "key": f"{market.get('condition_id')}:{decision.get('side')}",
+        "condition_id": market.get("condition_id"),
+        "slug": market.get("slug"),
+        "question": market.get("question"),
+        "side": decision.get("side"),
+        "first_seen_utc": now.isoformat(),
+        "last_seen_utc": now.isoformat(),
+        "first_entry_price": _float_or_none(decision.get("entry_price")),
+        "last_entry_price": _float_or_none(decision.get("entry_price")),
+        "first_signal_score": _float_or_none(decision.get("signal_score")),
+        "first_setup_score": _float_or_none(decision.get("setup_score")),
+        "seen_count": 1,
+    }
+
+
+def live_entry_confirmation_skip_reason(
+    config,
+    decision: Dict[str, Any],
+    now: datetime | None = None,
+) -> str | None:
+    if not getattr(config, "direct_live_entry_confirmation_enabled", False):
+        clear_entry_confirmation_state()
+        return None
+
+    side = decision.get("side")
+    market = decision.setdefault("market", {})
+    condition_id = market.get("condition_id")
+    if side not in {"yes", "no"} or not condition_id:
+        return None
+
+    state = load_entry_confirmation_state()
+    active = state.get("active") if isinstance(state.get("active"), dict) else None
+    key = f"{condition_id}:{side}"
+    remaining = _float_or_none(market.get("remaining_seconds"))
+    min_remaining = float(getattr(config, "direct_live_entry_confirmation_min_remaining_seconds", 95))
+    if (remaining is None or remaining < min_remaining) and not (active and active.get("key") == key):
+        return None
+
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    min_wait = float(getattr(config, "direct_live_entry_confirmation_min_wait_seconds", 25))
+    max_age = float(getattr(config, "direct_live_entry_confirmation_max_age_seconds", 130))
+    max_slippage = float(getattr(config, "direct_live_entry_confirmation_max_price_slippage_cents", 3.0)) / 100.0
+    current_price = _float_or_none(decision.get("entry_price"))
+
+    if not active or active.get("key") != key:
+        active = _new_entry_confirmation_record(decision, now)
+        state["active"] = active
+        save_entry_confirmation_state(state)
+        market["entry_confirmation"] = {"status": "pending", "seen_count": 1, "wait_seconds": min_wait}
+        return "entry confirmation pending (first sighting)"
+
+    first_seen = _parse_utc_datetime(active.get("first_seen_utc"))
+    if not first_seen:
+        active = _new_entry_confirmation_record(decision, now)
+        state["active"] = active
+        save_entry_confirmation_state(state)
+        market["entry_confirmation"] = {"status": "pending", "seen_count": 1, "wait_seconds": min_wait}
+        return "entry confirmation pending (state reset)"
+
+    age = max((now - first_seen).total_seconds(), 0.0)
+    if age > max_age:
+        active = _new_entry_confirmation_record(decision, now)
+        state["active"] = active
+        save_entry_confirmation_state(state)
+        market["entry_confirmation"] = {
+            "status": "pending",
+            "seen_count": 1,
+            "wait_seconds": min_wait,
+            "max_age_seconds": max_age,
+        }
+        return "entry confirmation stale; restarted"
+
+    first_price = _float_or_none(active.get("first_entry_price"))
+    if first_price is not None and current_price is not None and current_price > first_price + max_slippage:
+        active = _new_entry_confirmation_record(decision, now)
+        state["active"] = active
+        save_entry_confirmation_state(state)
+        market["entry_confirmation"] = {
+            "status": "price_reset",
+            "first_entry_price": first_price,
+            "current_entry_price": current_price,
+            "max_slippage": max_slippage,
+        }
+        return f"entry confirmation price slipped ({first_price:.3f}->{current_price:.3f})"
+
+    active["last_seen_utc"] = now.isoformat()
+    active["last_entry_price"] = current_price
+    active["seen_count"] = int(active.get("seen_count") or 1) + 1
+
+    if age < min_wait:
+        state["active"] = active
+        save_entry_confirmation_state(state)
+        market["entry_confirmation"] = {
+            "status": "pending",
+            "age_seconds": round(age, 1),
+            "wait_seconds": min_wait,
+            "seen_count": active["seen_count"],
+        }
+        return f"entry confirmation pending ({age:.0f}/{min_wait:.0f}s)"
+
+    state["active"] = None
+    state["last_confirmed"] = {
+        **active,
+        "confirmed_utc": now.isoformat(),
+        "age_seconds": round(age, 1),
+    }
+    save_entry_confirmation_state(state)
+    market["entry_confirmation"] = {
+        "status": "confirmed",
+        "age_seconds": round(age, 1),
+        "seen_count": active["seen_count"],
+        "first_entry_price": first_price,
+        "current_entry_price": current_price,
+    }
+    return None
 
 
 def _order_execution_snapshot(order_record: Dict[str, Any]) -> Dict[str, Any]:
@@ -1002,6 +1137,16 @@ def run_once(args: argparse.Namespace) -> int:
         return 0
     decision.amount_usd = risk.amount_usd
     decision_dict = apply_live_experiment_overrides(config, decision) if live and mode == "taker" else decision.to_dict()
+
+    if live and mode == "taker":
+        confirmation_skip = live_entry_confirmation_skip_reason(config, decision_dict)
+        if confirmation_skip:
+            decision_dict["should_trade"] = False
+            decision_dict["skip_reason"] = confirmation_skip
+            record_decision(decision_dict, live=live, status="skipped")
+            print_json({"status": "skipped", "risk": risk.__dict__, "decision": decision_dict})
+            return 0
+
     record_decision(decision_dict, live=live, status="candidate")
 
     if not live:

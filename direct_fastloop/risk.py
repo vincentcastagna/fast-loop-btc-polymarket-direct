@@ -119,6 +119,30 @@ def _daily_btc_cash_snapshot(config: BotConfig, user_address: str) -> dict:
     return _daily_asset_cash_snapshot(config, user_address)
 
 
+def _profit_lock_reason(config: BotConfig, state: dict, cash_pnl_today: float) -> Optional[str]:
+    previous_peak = state.get("peak_cash_pnl")
+    peak = cash_pnl_today if previous_peak is None else max(float(previous_peak), cash_pnl_today)
+    if previous_peak is None or round(float(previous_peak), 6) != round(peak, 6):
+        state["peak_cash_pnl"] = round(peak, 6)
+        save_daily_state(state)
+
+    if not getattr(config, "direct_daily_profit_lock_enabled", False):
+        return None
+
+    if state.get("profit_lock_triggered"):
+        return f"daily profit lock active (peak={peak:+.2f}, pnl={cash_pnl_today:+.2f})"
+
+    start = float(getattr(config, "direct_daily_profit_lock_start", 0.0) or 0.0)
+    giveback = float(getattr(config, "direct_daily_profit_lock_giveback", 0.0) or 0.0)
+    if start <= 0 or giveback <= 0:
+        return None
+    if peak >= start and cash_pnl_today <= peak - giveback:
+        state["profit_lock_triggered"] = True
+        save_daily_state(state)
+        return f"daily profit lock reached (peak={peak:+.2f}, pnl={cash_pnl_today:+.2f})"
+    return None
+
+
 def check_and_size(config: BotConfig, requested_usd: float, user_address: Optional[str] = None) -> RiskResult:
     state = load_daily_state()
     spent = float(state.get("spent") or 0)
@@ -141,6 +165,7 @@ def check_and_size(config: BotConfig, requested_usd: float, user_address: Option
             trades = synced_trades
         cash_pnl_today = float(snapshot["cash_pnl"])
         losses_today = int(snapshot["losses"])
+        profit_lock_reason = _profit_lock_reason(config, state, cash_pnl_today)
         if config.direct_max_daily_losses > 0 and losses_today >= config.direct_max_daily_losses:
             return RiskResult(
                 False,
@@ -161,6 +186,8 @@ def check_and_size(config: BotConfig, requested_usd: float, user_address: Option
                 losses_today,
                 cash_pnl_today,
             )
+        if profit_lock_reason:
+            return RiskResult(False, profit_lock_reason, 0.0, spent, trades, losses_today, cash_pnl_today)
 
     if trades >= config.direct_max_daily_trades:
         return RiskResult(False, "daily trade limit reached", 0.0, spent, trades, losses_today, cash_pnl_today)
