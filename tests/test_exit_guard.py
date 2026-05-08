@@ -59,14 +59,14 @@ def test_exit_triggers_on_loss_and_confluence():
     decision = build_exit_decision(
         config,
         fake_market(remaining=82),
-        fake_books(bid=0.48),
+        fake_books(bid=0.22),
         fake_order(),
-        current_signal("close location too weak", signal=0.52, close_location=0.74),
+        current_signal("weak signal score", signal=0.25, close_location=0.60),
         fee_rate_bps=1000,
     )
     assert decision["should_exit"] is True
-    assert decision["limit_price"] == 0.45
-    assert len(decision["bad_reasons"]) >= 2
+    assert decision["limit_price"] == 0.19
+    assert len(decision["bad_reasons"]) >= 3
 
 
 def test_exit_does_not_trigger_too_early():
@@ -88,7 +88,7 @@ def test_exit_requires_confluence():
     decision = build_exit_decision(
         config,
         fake_market(remaining=82),
-        fake_books(bid=0.48),
+        fake_books(bid=0.22),
         fake_order(),
         current_signal(None, signal=0.52, close_location=0.74),
         fee_rate_bps=1000,
@@ -110,3 +110,16 @@ def test_exit_does_not_trigger_when_loss_is_small():
     assert decision["should_exit"] is False
     assert "loss not large enough" in decision["skip_reason"]
 
+
+def test_exit_does_not_trigger_on_moderate_dip():
+    config = load_config()
+    decision = build_exit_decision(
+        config,
+        fake_market(remaining=82),
+        fake_books(bid=0.42),
+        fake_order(),
+        current_signal("weak signal score", signal=0.25, close_location=0.60),
+        fee_rate_bps=1000,
+    )
+    assert decision["should_exit"] is False
+    assert "loss not large enough" in decision["skip_reason"]
