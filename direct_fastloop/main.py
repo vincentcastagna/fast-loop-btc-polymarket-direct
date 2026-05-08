@@ -294,6 +294,8 @@ def live_quality_skip_reason(config, decision: Dict[str, Any]) -> str | None:
         return None
 
     side = decision.get("side")
+    if side == "no" and config.direct_live_strict_no_enabled:
+        return None
     market = decision.get("market") or {}
     momentum = decision.get("momentum") or {}
 
@@ -323,8 +325,58 @@ def live_quality_skip_reason(config, decision: Dict[str, Any]) -> str | None:
     return None
 
 
+def live_strict_no_skip_reason(config, decision: Dict[str, Any]) -> str | None:
+    if decision.get("side") != "no":
+        return None
+    if not config.direct_live_strict_no_enabled:
+        return None
+
+    momentum = decision.get("momentum") or {}
+    signal_score = _float_or_none(decision.get("signal_score"))
+    setup_score = _float_or_none(decision.get("setup_score"))
+    trend_ratio = _float_or_none(momentum.get("trend_ratio"))
+    recent_move = _float_or_none(momentum.get("recent_move_pct"))
+    one_min_move = _float_or_none(momentum.get("one_min_move_pct"))
+    volume_ratio = _float_or_none(momentum.get("volume_ratio"))
+    entry_price = _float_or_none(decision.get("entry_price"))
+
+    if signal_score is None or signal_score < config.direct_live_strict_no_min_signal_score:
+        return f"strict NO guard: signal too weak ({signal_score})"
+    if setup_score is None or setup_score < config.direct_live_strict_no_min_setup_score:
+        return f"strict NO guard: setup too weak ({setup_score})"
+    if trend_ratio is None or trend_ratio < config.direct_live_strict_no_min_trend_ratio:
+        return f"strict NO guard: trend too weak ({trend_ratio})"
+    if volume_ratio is None or volume_ratio < config.direct_live_strict_no_min_volume_ratio:
+        return f"strict NO guard: volume too thin ({volume_ratio})"
+    if entry_price is None or entry_price > config.direct_live_strict_no_max_entry_price:
+        return f"strict NO guard: entry price too high ({entry_price})"
+    if recent_move is None or recent_move > config.direct_live_strict_no_max_recent_move_pct:
+        return f"strict NO guard: recent move not negative ({recent_move})"
+    if one_min_move is None or one_min_move > config.direct_live_strict_no_max_one_min_move_pct:
+        return f"strict NO guard: one-minute move not negative ({one_min_move})"
+    return None
+
+
+def apply_live_experiment_overrides(config, decision) -> Dict[str, Any]:
+    if decision.side == "no" and config.direct_live_strict_no_enabled:
+        decision.amount_usd = min(float(decision.amount_usd), float(config.direct_live_strict_no_amount_usd))
+    decision_dict = decision.to_dict()
+    market = decision_dict.setdefault("market", {})
+    if decision_dict.get("side") == "no" and config.direct_live_strict_no_enabled:
+        market["strict_no_micro_test"] = True
+    return decision_dict
+
+
 def live_side_cap_skip_reason(config, decision: Dict[str, Any]) -> str | None:
     if decision.get("side") != "no":
+        return None
+    if config.direct_live_strict_no_enabled:
+        max_no_trades = int(config.direct_live_strict_no_max_daily_trades or 0)
+        if max_no_trades <= 0:
+            return "strict NO daily limit disabled"
+        no_trades_today = count_live_successes_today("no")
+        if no_trades_today >= max_no_trades:
+            return f"daily strict NO limit reached ({no_trades_today}/{max_no_trades})"
         return None
     if not config.direct_live_no_enabled:
         return "live NO micro-test disabled"
@@ -709,6 +761,12 @@ def record_late_shadow_observations(config, wallet, clob: DirectClob, markets, m
             decision_dict["skip_reason"] = "shadow already traded market live today"
             status = "shadow_late_skipped"
 
+        strict_no_skip = live_strict_no_skip_reason(config, decision_dict)
+        if strict_no_skip:
+            decision_dict["should_trade"] = False
+            decision_dict["skip_reason"] = strict_no_skip
+            status = "shadow_late_skipped"
+
         quality_skip = live_quality_skip_reason(config, decision_dict)
         if quality_skip:
             decision_dict["should_trade"] = False
@@ -783,6 +841,12 @@ def refreshed_live_taker_candidate(config, wallet, clob: DirectClob, market, mod
     if not decision.should_trade:
         return None, decision_dict, books, {"ok": False, "reason": decision.skip_reason}
 
+    strict_no_skip = live_strict_no_skip_reason(config, decision_dict)
+    if strict_no_skip:
+        decision_dict["should_trade"] = False
+        decision_dict["skip_reason"] = strict_no_skip
+        return None, decision_dict, books, {"ok": False, "reason": strict_no_skip}
+
     quality_skip = live_quality_skip_reason(config, decision_dict)
     if quality_skip:
         decision_dict["should_trade"] = False
@@ -795,6 +859,7 @@ def refreshed_live_taker_candidate(config, wallet, clob: DirectClob, market, mod
         decision_dict["skip_reason"] = side_skip
         return None, decision_dict, books, {"ok": False, "reason": side_skip}
 
+    decision_dict = apply_live_experiment_overrides(config, decision)
     risk = check_and_size(config, decision.amount_usd, user_address=wallet.funder_address)
     if not risk.ok:
         decision_dict["should_trade"] = False
@@ -802,7 +867,7 @@ def refreshed_live_taker_candidate(config, wallet, clob: DirectClob, market, mod
         return None, decision_dict, books, {"ok": False, "reason": risk.reason, "risk": risk.__dict__}
 
     decision.amount_usd = risk.amount_usd
-    return decision, decision.to_dict(), books, {"ok": True, "risk": risk.__dict__}
+    return decision, apply_live_experiment_overrides(config, decision), books, {"ok": True, "risk": risk.__dict__}
 
 
 def run_status() -> int:
@@ -905,6 +970,13 @@ def run_once(args: argparse.Namespace) -> int:
         return 0
 
     if live and mode == "taker":
+        strict_no_skip = live_strict_no_skip_reason(config, decision_dict)
+        if strict_no_skip:
+            decision_dict["should_trade"] = False
+            decision_dict["skip_reason"] = strict_no_skip
+            record_decision(decision_dict, live=live, status="skipped")
+            print_json({"status": "skipped", "decision": decision_dict})
+            return 0
         quality_skip = live_quality_skip_reason(config, decision_dict)
         if quality_skip:
             decision_dict["should_trade"] = False
@@ -920,6 +992,8 @@ def run_once(args: argparse.Namespace) -> int:
             print_json({"status": "skipped", "decision": decision_dict})
             return 0
 
+    if live and mode == "taker":
+        decision_dict = apply_live_experiment_overrides(config, decision)
     risk = check_and_size(config, decision.amount_usd, user_address=wallet.funder_address if live else None)
     if not risk.ok:
         decision_dict["skip_reason"] = risk.reason
@@ -927,7 +1001,7 @@ def run_once(args: argparse.Namespace) -> int:
         print_json({"status": "skipped", "risk": risk.__dict__, "decision": decision_dict})
         return 0
     decision.amount_usd = risk.amount_usd
-    decision_dict = decision.to_dict()
+    decision_dict = apply_live_experiment_overrides(config, decision) if live and mode == "taker" else decision.to_dict()
     record_decision(decision_dict, live=live, status="candidate")
 
     if not live:

@@ -130,6 +130,16 @@ class BotConfig:
     direct_live_block_negative_one_min: bool
     direct_live_no_enabled: bool
     direct_live_max_daily_no_trades: int
+    direct_live_strict_no_enabled: bool
+    direct_live_strict_no_max_daily_trades: int
+    direct_live_strict_no_amount_usd: float
+    direct_live_strict_no_min_signal_score: float
+    direct_live_strict_no_min_setup_score: float
+    direct_live_strict_no_min_trend_ratio: float
+    direct_live_strict_no_min_volume_ratio: float
+    direct_live_strict_no_max_entry_price: float
+    direct_live_strict_no_max_recent_move_pct: float
+    direct_live_strict_no_max_one_min_move_pct: float
     direct_live_choppy_yes_enabled: bool
     direct_live_max_daily_choppy_yes_trades: int
     direct_live_choppy_yes_min_trend_ratio: float
@@ -264,6 +274,16 @@ def load_config(path: Path = CONFIG_PATH) -> BotConfig:
         direct_live_block_negative_one_min=bool(payload.get("direct_live_block_negative_one_min", True)),
         direct_live_no_enabled=bool(payload.get("direct_live_no_enabled", False)),
         direct_live_max_daily_no_trades=int(payload.get("direct_live_max_daily_no_trades", 0)),
+        direct_live_strict_no_enabled=bool(payload.get("direct_live_strict_no_enabled", False)),
+        direct_live_strict_no_max_daily_trades=int(payload.get("direct_live_strict_no_max_daily_trades", 0)),
+        direct_live_strict_no_amount_usd=float(payload.get("direct_live_strict_no_amount_usd", 3.0)),
+        direct_live_strict_no_min_signal_score=float(payload.get("direct_live_strict_no_min_signal_score", 0.45)),
+        direct_live_strict_no_min_setup_score=float(payload.get("direct_live_strict_no_min_setup_score", 0.50)),
+        direct_live_strict_no_min_trend_ratio=float(payload.get("direct_live_strict_no_min_trend_ratio", 0.75)),
+        direct_live_strict_no_min_volume_ratio=float(payload.get("direct_live_strict_no_min_volume_ratio", 0.50)),
+        direct_live_strict_no_max_entry_price=float(payload.get("direct_live_strict_no_max_entry_price", 0.55)),
+        direct_live_strict_no_max_recent_move_pct=float(payload.get("direct_live_strict_no_max_recent_move_pct", 0.0)),
+        direct_live_strict_no_max_one_min_move_pct=float(payload.get("direct_live_strict_no_max_one_min_move_pct", 0.0)),
         direct_live_choppy_yes_enabled=bool(payload.get("direct_live_choppy_yes_enabled", False)),
         direct_live_max_daily_choppy_yes_trades=int(payload.get("direct_live_max_daily_choppy_yes_trades", 0)),
         direct_live_choppy_yes_min_trend_ratio=float(payload.get("direct_live_choppy_yes_min_trend_ratio", 0.50)),
