@@ -39,6 +39,8 @@ def almost_equal(left: float, right: float, tol: float = 1e-12) -> None:
 def main() -> int:
     original = load_original()
     config = load_config()
+    parity_min_time = getattr(original, "MIN_TIME_REMAINING", config.min_time_remaining)
+    parity_max_time = getattr(original, "MAX_TIME_REMAINING", config.max_time_remaining)
 
     fixtures = [
         {
@@ -108,8 +110,8 @@ def main() -> int:
                     min_momentum_pct=config.min_momentum_pct,
                     min_confirmation_pct=config.min_confirmation_pct,
                     min_strike_distance_pct=config.min_strike_distance_pct,
-                    min_time_remaining=config.min_time_remaining,
-                    max_time_remaining=config.max_time_remaining,
+                    min_time_remaining=parity_min_time,
+                    max_time_remaining=parity_max_time,
                     window_seconds=300,
                 ),
                 original.estimate_path_aware_yes_prob(momentum, remaining, strike_distance),
@@ -124,8 +126,8 @@ def main() -> int:
                     edge,
                     min_momentum_pct=config.min_momentum_pct,
                     min_strike_distance_pct=config.min_strike_distance_pct,
-                    min_time_remaining=config.min_time_remaining,
-                    max_time_remaining=config.max_time_remaining,
+                    min_time_remaining=parity_min_time,
+                    max_time_remaining=parity_max_time,
                     window_seconds=300,
                 ),
                 original.compute_setup_score(momentum, remaining, 0.54, strike_distance, edge),
