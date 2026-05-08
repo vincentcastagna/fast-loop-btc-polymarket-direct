@@ -101,7 +101,7 @@
   "direct_shadow_late_max_time_remaining": 45,
   "direct_shadow_exit_enabled": true,
   "direct_live_exit_enabled": true,
-  "direct_live_exit_shadow_only": false,
+  "direct_live_exit_shadow_only": true,
   "direct_live_exit_max_remaining_seconds": 90,
   "direct_live_exit_min_remaining_seconds": 15,
   "direct_live_exit_max_unrealized_pnl": -1.25,

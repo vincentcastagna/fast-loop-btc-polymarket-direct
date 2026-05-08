@@ -82,24 +82,28 @@ def _daily_asset_cash_snapshot(config: BotConfig, user_address: str) -> dict:
         if not any(pattern in title for pattern in _asset_title_patterns(config.asset)):
             continue
         slug = str(row.get("eventSlug") or row.get("marketSlug") or title)
-        bucket = by_market.setdefault(slug, {"buy": 0.0, "redeem": 0.0})
+        bucket = by_market.setdefault(slug, {"buy": 0.0, "sell": 0.0, "redeem": 0.0})
         usdc = float(row.get("usdcSize") or 0.0)
         row_type = str(row.get("type") or "").upper()
         side = str(row.get("side") or "").upper()
         if row_type == "TRADE" and side == "BUY":
             cash_out += usdc
             bucket["buy"] += usdc
+        elif row_type == "TRADE" and side == "SELL":
+            cash_in += usdc
+            bucket["sell"] += usdc
         elif row_type == "REDEEM":
             cash_in += usdc
             bucket["redeem"] += usdc
 
     losses = 0
     for slug, bucket in by_market.items():
-        if bucket["buy"] <= 0 or bucket["redeem"] > 0:
+        if bucket["buy"] <= 0:
             continue
         market_start = _fast_market_start_epoch(slug)
         ended = market_start is not None and now_epoch >= market_start + window_seconds + 60
-        if ended:
+        recovered = bucket["sell"] + bucket["redeem"]
+        if ended and recovered < bucket["buy"]:
             losses += 1
 
     return {
