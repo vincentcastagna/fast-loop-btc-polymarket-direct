@@ -73,7 +73,7 @@
   "direct_max_daily_trades": 10,
   "direct_max_daily_losses": 0,
   "direct_daily_stop_loss": -10.0,
-  "direct_guard_reset_utc": "2026-05-05T12:13:16Z",
+  "direct_guard_reset_utc": "2026-05-09T01:40:34Z",
   "direct_live_quality_filter": true,
   "direct_live_require_micro_side": true,
   "direct_live_min_recent_move_pct": 0.02,
