@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass, is_dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
+from .chainlink import observe_latest_sample, read_samples
 from .http import api_get_json
 
 
@@ -35,6 +36,10 @@ class Momentum:
     close_location: float
     reversal_pct: float
     candles: int
+    source: str = "binance"
+    source_detail: Optional[str] = None
+    feed_updated_at_utc: Optional[str] = None
+    feed_age_seconds: Optional[float] = None
 
 
 def momentum_to_dict(momentum: Momentum | Dict[str, Any]) -> Dict[str, Any]:
@@ -125,9 +130,153 @@ def get_binance_momentum(asset: str = "BTC", lookback_minutes: int = 5) -> Optio
             close_location=close_location,
             reversal_pct=reversal_pct,
             candles=len(candles),
+            source="binance",
         )
     except (IndexError, ValueError, KeyError, ZeroDivisionError):
         return None
+
+
+def _wants_chainlink(source: str) -> bool:
+    return str(source or "").lower() in {"chainlink", "chainlink_primary", "chainlink-first", "chainlink_first"}
+
+
+def _sample_gap_ok(rows: list[dict[str, Any]], max_gap_seconds: int) -> bool:
+    if max_gap_seconds <= 0 or len(rows) < 2:
+        return True
+    for previous, current in zip(rows, rows[1:]):
+        gap = (current["_observed_at"] - previous["_observed_at"]).total_seconds()
+        if gap > max_gap_seconds:
+            return False
+    return True
+
+
+def get_chainlink_momentum(
+    asset: str = "BTC",
+    lookback_minutes: int = 5,
+    *,
+    rpc_url: Optional[str] = None,
+    feed_address: Optional[str] = None,
+    max_feed_age_seconds: int = 180,
+    min_samples: int = 3,
+    max_sample_gap_seconds: int = 150,
+) -> Optional[Momentum]:
+    """Build local momentum from Chainlink latestRoundData samples.
+
+    Chainlink Data Feeds expose current oracle rounds, not historical candles.
+    The bot samples latestRoundData on each scheduled run, then computes the
+    same momentum shape from recent local samples. Binance remains the fallback
+    while the sample window is warming up or if the feed/RPC is stale.
+    """
+    asset = asset.upper()
+    latest = observe_latest_sample(
+        asset,
+        rpc_url=rpc_url,
+        feed_address=feed_address,
+        max_feed_age_seconds=max_feed_age_seconds,
+    )
+    if latest is None:
+        return None
+
+    now = datetime.now(timezone.utc)
+    lookback_seconds = max(60, int(lookback_minutes * 60))
+    cutoff = now - timedelta(seconds=lookback_seconds)
+    rows = read_samples(asset)
+    rows = [
+        row
+        for row in rows
+        if row["_observed_at"] >= now - timedelta(seconds=max(lookback_seconds * 2, 900))
+    ]
+    if len(rows) < max(2, min_samples):
+        return None
+
+    current = rows[-1]
+    previous_candidates = [row for row in rows if row["_observed_at"] <= cutoff]
+    previous = previous_candidates[-1] if previous_candidates else rows[0]
+    observed_span = (current["_observed_at"] - previous["_observed_at"]).total_seconds()
+    if observed_span < min(lookback_seconds * 0.55, 90):
+        return None
+
+    window_rows = [row for row in rows if row["_observed_at"] >= previous["_observed_at"]]
+    if not _sample_gap_ok(window_rows, max_sample_gap_seconds):
+        return None
+
+    prices = [float(row["_price"]) for row in window_rows]
+    if len(prices) < 2 or previous["_price"] <= 0:
+        return None
+
+    price_then = float(previous["_price"])
+    price_now = float(current["_price"])
+    momentum_pct = ((price_now - price_then) / price_then) * 100
+    direction = "up" if momentum_pct > 0 else "down"
+    direction_sign = 1 if momentum_pct >= 0 else -1
+    deltas = [prices[i] - prices[i - 1] for i in range(1, len(prices))]
+    trend_ratio = (
+        sum(1 for delta in deltas if delta * direction_sign > 0) / len(deltas)
+        if deltas else 0.0
+    )
+
+    if len(prices) >= 3:
+        recent_anchor = prices[-3]
+        recent_move_pct = ((price_now - recent_anchor) / recent_anchor) * 100 if recent_anchor > 0 else momentum_pct
+    else:
+        recent_move_pct = momentum_pct
+    two_min_move_pct = recent_move_pct
+
+    one_min_anchor = prices[-2]
+    one_min_move_pct = ((price_now - one_min_anchor) / one_min_anchor) * 100 if one_min_anchor > 0 else momentum_pct
+    last_candle_move_pct = one_min_move_pct
+
+    session_high = max(prices)
+    session_low = min(prices)
+    session_range = max(session_high - session_low, 1e-9)
+    if direction == "up":
+        close_location = (price_now - session_low) / session_range
+    else:
+        close_location = (session_high - price_now) / session_range
+
+    reversal_pct = 0.0
+    if momentum_pct != 0 and last_candle_move_pct * momentum_pct < 0:
+        reversal_pct = min(1.0, abs(last_candle_move_pct) / abs(momentum_pct))
+
+    return Momentum(
+        asset=asset,
+        symbol=f"CHAINLINK:{asset}/USD",
+        price_now=price_now,
+        price_then=price_then,
+        momentum_pct=momentum_pct,
+        direction=direction,
+        avg_volume=0.0,
+        latest_volume=0.0,
+        volume_ratio=0.7,
+        trend_ratio=trend_ratio,
+        one_min_move_pct=one_min_move_pct,
+        two_min_move_pct=two_min_move_pct,
+        recent_move_pct=recent_move_pct,
+        last_candle_move_pct=last_candle_move_pct,
+        close_location=close_location,
+        reversal_pct=reversal_pct,
+        candles=len(window_rows),
+        source="chainlink",
+        source_detail=f"{latest.feed_address} round {latest.round_id}",
+        feed_updated_at_utc=latest.updated_at.isoformat(),
+        feed_age_seconds=round(latest.age_seconds, 3),
+    )
+
+
+def get_signal_momentum(config) -> Optional[Momentum]:
+    if getattr(config, "chainlink_enabled", False) and _wants_chainlink(getattr(config, "signal_source", "")):
+        momentum = get_chainlink_momentum(
+            config.asset,
+            config.lookback_minutes,
+            rpc_url=getattr(config, "chainlink_rpc_url", None),
+            feed_address=getattr(config, "chainlink_feed_address", None),
+            max_feed_age_seconds=getattr(config, "chainlink_max_feed_age_seconds", 180),
+            min_samples=getattr(config, "chainlink_min_samples", 3),
+            max_sample_gap_seconds=getattr(config, "chainlink_max_sample_gap_seconds", 150),
+        )
+        if momentum:
+            return momentum
+    return get_binance_momentum(config.asset, config.lookback_minutes)
 
 
 def get_binance_price_at(asset: str, boundary_utc: datetime) -> Optional[float]:
@@ -145,6 +294,33 @@ def get_binance_price_at(asset: str, boundary_utc: datetime) -> Optional[float]:
         except (IndexError, ValueError, TypeError):
             return None
     return None
+
+
+def get_chainlink_price_near(asset: str, boundary_utc: datetime, max_gap_seconds: int = 150) -> Optional[float]:
+    rows = read_samples(asset.upper())
+    if not rows:
+        return None
+    best = min(rows, key=lambda row: abs((row["_observed_at"] - boundary_utc).total_seconds()))
+    gap = abs((best["_observed_at"] - boundary_utc).total_seconds())
+    if max_gap_seconds > 0 and gap > max_gap_seconds:
+        return None
+    return float(best["_price"])
+
+
+def get_reference_price_at(config, boundary_utc: datetime, meta: Optional[dict[str, Any]] = None) -> Optional[float]:
+    if getattr(config, "chainlink_enabled", False) and _wants_chainlink(getattr(config, "signal_source", "")):
+        price = get_chainlink_price_near(
+            config.asset,
+            boundary_utc,
+            max_gap_seconds=getattr(config, "chainlink_max_sample_gap_seconds", 150),
+        )
+        if price is not None:
+            if meta is not None:
+                meta["market_open_price_source"] = "chainlink"
+            return price
+    if meta is not None:
+        meta["market_open_price_source"] = "binance"
+    return get_binance_price_at(config.asset, boundary_utc)
 
 
 def _clamp(value: float, low: float, high: float) -> float:

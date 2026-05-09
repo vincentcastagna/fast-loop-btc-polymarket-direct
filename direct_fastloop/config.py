@@ -66,6 +66,12 @@ class BotConfig:
     asset: str
     window: str
     signal_source: str
+    chainlink_enabled: bool
+    chainlink_rpc_url: Optional[str]
+    chainlink_feed_address: Optional[str]
+    chainlink_max_feed_age_seconds: int
+    chainlink_min_samples: int
+    chainlink_max_sample_gap_seconds: int
     strategy_mode: str
     allowed_side: str
     lookback_minutes: int
@@ -222,7 +228,13 @@ def load_config(path: Path = CONFIG_PATH) -> BotConfig:
         probe_min_momentum_pct=float(payload.get("probe_min_momentum_pct", 0.0)),
         asset=os.environ.get("DIRECT_FASTLOOP_ASSET", payload.get("asset", "BTC")).upper(),
         window=os.environ.get("DIRECT_FASTLOOP_WINDOW", payload.get("window", "5m")),
-        signal_source=payload.get("signal_source", "binance"),
+        signal_source=os.environ.get("DIRECT_FASTLOOP_SIGNAL_SOURCE", payload.get("signal_source", "binance")),
+        chainlink_enabled=bool(payload.get("chainlink_enabled", False)),
+        chainlink_rpc_url=os.environ.get("CHAINLINK_RPC_URL") or payload.get("chainlink_rpc_url") or None,
+        chainlink_feed_address=payload.get("chainlink_feed_address") or None,
+        chainlink_max_feed_age_seconds=int(payload.get("chainlink_max_feed_age_seconds", 180)),
+        chainlink_min_samples=int(payload.get("chainlink_min_samples", 3)),
+        chainlink_max_sample_gap_seconds=int(payload.get("chainlink_max_sample_gap_seconds", 150)),
         strategy_mode=payload.get("strategy_mode", "momentum_first"),
         allowed_side=payload.get("allowed_side", "yes_only"),
         lookback_minutes=_env_int("DIRECT_FASTLOOP_LOOKBACK_MINUTES", int(payload.get("lookback_minutes", 5))),

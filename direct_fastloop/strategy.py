@@ -13,7 +13,7 @@ from .signal import (
     compute_setup_score,
     compute_signal_score,
     estimate_path_aware_yes_prob,
-    get_binance_price_at,
+    get_reference_price_at,
     infer_move_side,
     momentum_to_dict,
     norm_cdf,
@@ -225,13 +225,15 @@ def evaluate_trade(
     direction_sign = 1 if direction == "up" else -1
     momentum_pct = abs(m["momentum_pct"])
     start_time = market.end_time - timedelta(seconds=_window_seconds(config))
-    market_open_price = get_binance_price_at(config.asset, start_time)
+    reference_meta: dict = {}
+    market_open_price = get_reference_price_at(config, start_time, meta=reference_meta)
     strike_distance_pct = None
     strike_side = None
     if market_open_price and market_open_price > 0:
         strike_distance_pct = ((m["price_now"] - market_open_price) / market_open_price) * 100
         strike_side = "yes" if strike_distance_pct > 0 else "no"
         base["market_open_price"] = market_open_price
+        base.update(reference_meta)
         base["strike_distance_pct"] = strike_distance_pct
 
     momentum_side = "yes" if direction == "up" else "no"

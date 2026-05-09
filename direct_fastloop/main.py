@@ -30,7 +30,7 @@ from .ledger import (
 )
 from .markets import choose_live_market, discover_fast_markets
 from .risk import check_and_size, mark_live_success
-from .signal import get_binance_momentum
+from .signal import get_signal_momentum
 from .strategy import evaluate_trade, polymarket_fee_per_share
 
 
@@ -854,7 +854,7 @@ def monitor_live_exit(config, clob: DirectClob, markets, mode: str, live: bool) 
             return None
 
         market_yes_price = clob.get_midpoint(market.yes_token_id)
-        momentum = get_binance_momentum(config.asset, config.lookback_minutes)
+        momentum = get_signal_momentum(config)
         if not momentum:
             payload = {
                 "action": "exit",
@@ -933,7 +933,7 @@ def record_late_shadow_observations(config, wallet, clob: DirectClob, markets, m
     _record_shadow_exit_snapshot(config, market, books, live=live)
 
     market_yes_price = clob.get_midpoint(market.yes_token_id)
-    momentum = get_binance_momentum(config.asset, config.lookback_minutes)
+    momentum = get_signal_momentum(config)
     if not momentum:
         record_shadow(
             {
@@ -1032,7 +1032,7 @@ def refreshed_live_taker_candidate(config, wallet, clob: DirectClob, market, mod
         return None, payload, None, {"ok": False, "reason": payload["skip_reason"]}
 
     market_yes_price = clob.get_midpoint(market.yes_token_id)
-    momentum = get_binance_momentum(config.asset, config.lookback_minutes)
+    momentum = get_signal_momentum(config)
     if not momentum:
         payload = {"should_trade": False, "skip_reason": "retry signal fetch failed", "market": {"question": market.question}}
         return None, payload, books, {"ok": False, "reason": payload["skip_reason"]}
@@ -1149,7 +1149,7 @@ def run_once(args: argparse.Namespace) -> int:
         return 0
     market_yes_price = clob.get_midpoint(market.yes_token_id)
 
-    momentum = get_binance_momentum(config.asset, config.lookback_minutes)
+    momentum = get_signal_momentum(config)
     if not momentum:
         payload = {"status": "skipped", "skip_reason": "signal fetch failed", "market": market.question}
         print_json(payload)
@@ -1318,7 +1318,7 @@ def run_once(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Direct Polymarket FastLoop BTC bot, no Simmer SDK.")
+    parser = argparse.ArgumentParser(description="Direct Polymarket FastLoop bot, no Simmer SDK.")
     parser.add_argument("--live", action="store_true", help="Place a real Polymarket order. Dry-run by default.")
     parser.add_argument("--yes-i-understand", action="store_true", help="Required live confirmation flag.")
     parser.add_argument("--mode", choices=["taker", "maker"], default="taker", help="Execution style to evaluate/run.")
