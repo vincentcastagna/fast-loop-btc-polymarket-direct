@@ -14,6 +14,7 @@ DECISION_LOG = LOG_DIR / "direct_decisions.jsonl"
 ORDER_LOG = LOG_DIR / "direct_orders.jsonl"
 SHADOW_LOG = LOG_DIR / "direct_shadow_decisions.jsonl"
 ENTRY_CONFIRM_STATE = LOG_DIR / "direct_entry_confirmation_state.json"
+POSITION_GUARD_STATE = LOG_DIR / "direct_position_guard_state.json"
 
 
 def _json_default(value: Any) -> Any:
@@ -87,6 +88,21 @@ def clear_entry_confirmation_state() -> None:
         ENTRY_CONFIRM_STATE.unlink()
     except FileNotFoundError:
         pass
+
+
+def load_position_guard_state() -> Dict[str, Any]:
+    if not POSITION_GUARD_STATE.exists():
+        return {}
+    try:
+        data = json.loads(POSITION_GUARD_STATE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_position_guard_state(state: Dict[str, Any]) -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    POSITION_GUARD_STATE.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
 def record_attempt(decision: Dict[str, Any], result: Dict[str, Any], live: bool) -> None:

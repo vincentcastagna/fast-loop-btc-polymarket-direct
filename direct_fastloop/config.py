@@ -150,6 +150,7 @@ class BotConfig:
     direct_live_entry_confirmation_min_remaining_seconds: int
     direct_live_entry_confirmation_max_age_seconds: int
     direct_live_entry_confirmation_max_price_slippage_cents: float
+    direct_live_entry_confirmation_max_adverse_price_move_cents: float
     direct_daily_profit_lock_enabled: bool
     direct_daily_profit_lock_start: float
     direct_daily_profit_lock_giveback: float
@@ -166,6 +167,10 @@ class BotConfig:
     direct_live_exit_slippage_cents: float
     direct_live_exit_min_bid: float
     direct_live_exit_yes_only: bool
+    direct_live_profit_trail_enabled: bool
+    direct_live_profit_trail_start: float
+    direct_live_profit_trail_giveback: float
+    direct_live_profit_trail_min_pnl: float
     maker: MakerConfig
 
 
@@ -310,6 +315,9 @@ def load_config(path: Path = CONFIG_PATH) -> BotConfig:
         direct_live_entry_confirmation_max_price_slippage_cents=float(
             payload.get("direct_live_entry_confirmation_max_price_slippage_cents", 3.0)
         ),
+        direct_live_entry_confirmation_max_adverse_price_move_cents=float(
+            payload.get("direct_live_entry_confirmation_max_adverse_price_move_cents", 6.0)
+        ),
         direct_daily_profit_lock_enabled=bool(payload.get("direct_daily_profit_lock_enabled", False)),
         direct_daily_profit_lock_start=float(payload.get("direct_daily_profit_lock_start", 5.0)),
         direct_daily_profit_lock_giveback=float(payload.get("direct_daily_profit_lock_giveback", 3.5)),
@@ -326,6 +334,10 @@ def load_config(path: Path = CONFIG_PATH) -> BotConfig:
         direct_live_exit_slippage_cents=float(payload.get("direct_live_exit_slippage_cents", 3.0)),
         direct_live_exit_min_bid=float(payload.get("direct_live_exit_min_bid", 0.05)),
         direct_live_exit_yes_only=bool(payload.get("direct_live_exit_yes_only", True)),
+        direct_live_profit_trail_enabled=bool(payload.get("direct_live_profit_trail_enabled", False)),
+        direct_live_profit_trail_start=float(payload.get("direct_live_profit_trail_start", 1.0)),
+        direct_live_profit_trail_giveback=float(payload.get("direct_live_profit_trail_giveback", 0.6)),
+        direct_live_profit_trail_min_pnl=float(payload.get("direct_live_profit_trail_min_pnl", 0.25)),
         maker=maker,
     )
 

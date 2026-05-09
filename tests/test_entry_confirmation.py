@@ -19,6 +19,7 @@ def confirmation_config(**overrides):
         "direct_live_entry_confirmation_min_remaining_seconds": 95,
         "direct_live_entry_confirmation_max_age_seconds": 130,
         "direct_live_entry_confirmation_max_price_slippage_cents": 3.0,
+        "direct_live_entry_confirmation_max_adverse_price_move_cents": 6.0,
     }
     payload.update(overrides)
     return SimpleNamespace(**payload)
@@ -89,6 +90,22 @@ def test_entry_confirmation_resets_when_price_slips(tmp_path, monkeypatch):
 
     assert reason == "entry confirmation price slipped (0.500->0.550)"
     assert slipped["market"]["entry_confirmation"]["status"] == "price_reset"
+
+
+def test_entry_confirmation_resets_when_side_price_collapses(tmp_path, monkeypatch):
+    monkeypatch.setattr(ledger, "ENTRY_CONFIRM_STATE", tmp_path / "entry_confirm.json")
+    now = datetime(2026, 5, 8, 18, 0, tzinfo=timezone.utc)
+
+    main_module.live_entry_confirmation_skip_reason(confirmation_config(), decision(entry_price=0.62), now=now)
+    collapsed = decision(entry_price=0.45)
+    reason = main_module.live_entry_confirmation_skip_reason(
+        confirmation_config(),
+        collapsed,
+        now=now + timedelta(seconds=30),
+    )
+
+    assert reason == "entry confirmation adverse price move (0.620->0.450)"
+    assert collapsed["market"]["entry_confirmation"]["status"] == "adverse_price_reset"
 
 
 def test_active_confirmation_does_not_bypass_below_min_remaining(tmp_path, monkeypatch):

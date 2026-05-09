@@ -21,10 +21,12 @@ from .ledger import (
     get_live_success_for_market_today,
     has_live_success_for_market_today,
     load_entry_confirmation_state,
+    load_position_guard_state,
     record_attempt,
     record_decision,
     record_shadow,
     save_entry_confirmation_state,
+    save_position_guard_state,
 )
 from .markets import choose_live_market, discover_fast_markets
 from .risk import check_and_size, mark_live_success
@@ -499,6 +501,21 @@ def live_entry_confirmation_skip_reason(
         return "entry confirmation stale; restarted"
 
     first_price = _float_or_none(active.get("first_entry_price"))
+    max_adverse_move = (
+        float(getattr(config, "direct_live_entry_confirmation_max_adverse_price_move_cents", 6.0)) / 100.0
+    )
+    if first_price is not None and current_price is not None and current_price < first_price - max_adverse_move:
+        active = _new_entry_confirmation_record(decision, now)
+        state["active"] = active
+        save_entry_confirmation_state(state)
+        market["entry_confirmation"] = {
+            "status": "adverse_price_reset",
+            "first_entry_price": first_price,
+            "current_entry_price": current_price,
+            "max_adverse_move": max_adverse_move,
+        }
+        return f"entry confirmation adverse price move ({first_price:.3f}->{current_price:.3f})"
+
     if first_price is not None and current_price is not None and current_price > first_price + max_slippage:
         active = _new_entry_confirmation_record(decision, now)
         state["active"] = active
@@ -675,6 +692,47 @@ def exit_badness_reasons(config, held_side: str, decision: Dict[str, Any]) -> li
     return bad_reasons
 
 
+def update_position_profit_trail(config, market, exit_pnl: float | None) -> Dict[str, Any] | None:
+    if not getattr(config, "direct_live_profit_trail_enabled", False):
+        return None
+    if exit_pnl is None:
+        return None
+
+    key = str(getattr(market, "condition_id", "") or getattr(market, "slug", "") or "")
+    if not key:
+        return None
+
+    state = load_position_guard_state()
+    active = state.get(key) if isinstance(state.get(key), dict) else {}
+    previous_peak = _float_or_none(active.get("peak_exit_pnl"))
+    peak = float(exit_pnl) if previous_peak is None else max(float(previous_peak), float(exit_pnl))
+    active.update(
+        {
+            "condition_id": getattr(market, "condition_id", None),
+            "slug": getattr(market, "slug", None),
+            "question": getattr(market, "question", None),
+            "peak_exit_pnl": round(peak, 6),
+            "last_exit_pnl": round(float(exit_pnl), 6),
+            "updated_utc": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    state[key] = active
+    save_position_guard_state(state)
+
+    start = float(getattr(config, "direct_live_profit_trail_start", 1.0) or 0.0)
+    giveback = float(getattr(config, "direct_live_profit_trail_giveback", 0.6) or 0.0)
+    min_pnl = float(getattr(config, "direct_live_profit_trail_min_pnl", 0.25) or 0.0)
+    should_exit = peak >= start and float(exit_pnl) >= min_pnl and float(exit_pnl) <= peak - giveback
+    return {
+        "peak_exit_pnl": round(peak, 6),
+        "last_exit_pnl": round(float(exit_pnl), 6),
+        "start": start,
+        "giveback": giveback,
+        "min_pnl": min_pnl,
+        "should_exit": should_exit,
+    }
+
+
 def build_exit_decision(config, market, books, order_record: Dict[str, Any], current_decision: Dict[str, Any], fee_rate_bps: int) -> Dict[str, Any]:
     execution = _order_execution_snapshot(order_record)
     held_side = str(execution.get("side") or "")
@@ -690,6 +748,7 @@ def build_exit_decision(config, market, books, order_record: Dict[str, Any], cur
         exit_pnl = exit_value - cost
 
     bad_reasons = exit_badness_reasons(config, held_side, current_decision)
+    profit_trail = update_position_profit_trail(config, market, exit_pnl)
     token_id = _token_id_for_side(market, held_side)
     min_bid = float(config.direct_live_exit_min_bid)
     slippage = float(config.direct_live_exit_slippage_cents) / 100.0
@@ -699,37 +758,52 @@ def build_exit_decision(config, market, books, order_record: Dict[str, Any], cur
 
     should_exit = True
     reason = None
+    exit_reason = "loss_guard"
     if not token_id:
         should_exit = False
         reason = "held token unavailable"
+        exit_reason = None
     elif config.direct_live_exit_yes_only and held_side != "yes":
         should_exit = False
         reason = "exit guard supports YES only"
+        exit_reason = None
     elif shares is None or shares <= 0 or cost is None or cost <= 0:
         should_exit = False
         reason = "position size unavailable"
+        exit_reason = None
     elif current_bid is None:
         should_exit = False
         reason = "no exit bid"
+        exit_reason = None
     elif current_bid < min_bid:
         should_exit = False
         reason = f"exit bid below minimum ({current_bid})"
+        exit_reason = None
     elif remaining > config.direct_live_exit_max_remaining_seconds:
         should_exit = False
         reason = f"too early for exit guard ({remaining:.1f}s)"
+        exit_reason = None
     elif remaining < config.direct_live_exit_min_remaining_seconds:
         should_exit = False
         reason = f"too late for controlled exit ({remaining:.1f}s)"
+        exit_reason = None
+    elif profit_trail and profit_trail.get("should_exit"):
+        should_exit = True
+        reason = None
+        exit_reason = "profit_trail"
     elif exit_pnl is None or exit_pnl > config.direct_live_exit_max_unrealized_pnl:
         should_exit = False
         reason = f"loss not large enough ({exit_pnl})"
+        exit_reason = None
     elif len(bad_reasons) < config.direct_live_exit_min_bad_reasons:
         should_exit = False
         reason = f"exit confluence too weak ({len(bad_reasons)}/{config.direct_live_exit_min_bad_reasons})"
+        exit_reason = None
 
     return {
         "action": "exit",
         "should_exit": should_exit,
+        "exit_reason": exit_reason,
         "skip_reason": reason,
         "side": held_side,
         "token_id": token_id,
@@ -743,6 +817,7 @@ def build_exit_decision(config, market, books, order_record: Dict[str, Any], cur
         "fee_per_share": fee_per_share,
         "exit_value_at_bid": exit_value,
         "exit_pnl_at_bid": exit_pnl,
+        "profit_trail": profit_trail,
         "bad_reasons": bad_reasons,
         "current_signal": current_decision,
         "market": {

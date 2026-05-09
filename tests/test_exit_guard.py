@@ -9,7 +9,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from direct_fastloop.config import load_config
+from direct_fastloop import ledger
 from direct_fastloop.main import build_exit_decision
+
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def position_guard_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(ledger, "POSITION_GUARD_STATE", tmp_path / "position_guard.json")
 
 
 def fake_market(remaining: float = 82.0):
@@ -37,6 +46,15 @@ def fake_order():
         "live": True,
         "decision": {"side": "yes", "entry_price": 0.625},
         "result": {"success": True, "takingAmount": "7.692305", "makingAmount": "4.999998"},
+    }
+
+
+def fake_low_cost_order():
+    return {
+        "timestamp_utc": "2026-05-09T13:28:06+00:00",
+        "live": True,
+        "decision": {"side": "yes", "entry_price": 0.445},
+        "result": {"success": True, "takingAmount": "10.416665", "makingAmount": "4.999999"},
     }
 
 
@@ -123,3 +141,28 @@ def test_exit_does_not_trigger_on_moderate_dip():
     )
     assert decision["should_exit"] is False
     assert "loss not large enough" in decision["skip_reason"]
+
+
+def test_profit_trail_exits_after_giveback():
+    config = load_config()
+    first = build_exit_decision(
+        config,
+        fake_market(remaining=82),
+        fake_books(bid=0.63),
+        fake_low_cost_order(),
+        current_signal(None, signal=0.62, close_location=1.0),
+        fee_rate_bps=1000,
+    )
+    assert first["should_exit"] is False
+    assert first["profit_trail"]["peak_exit_pnl"] > 1.0
+
+    second = build_exit_decision(
+        config,
+        fake_market(remaining=54),
+        fake_books(bid=0.57),
+        fake_low_cost_order(),
+        current_signal(None, signal=0.61, close_location=1.0),
+        fee_rate_bps=1000,
+    )
+    assert second["should_exit"] is True
+    assert second["exit_reason"] == "profit_trail"

@@ -36,6 +36,7 @@ def test_daily_cash_snapshot_counts_exit_sells(monkeypatch):
     ]
 
     monkeypatch.setattr(risk, "api_get_json", lambda *args, **kwargs: rows)
+    monkeypatch.setattr(risk, "_today_start_epoch", lambda: 1778247000)
 
     snapshot = risk._daily_asset_cash_snapshot(config, "0xwallet")
 
