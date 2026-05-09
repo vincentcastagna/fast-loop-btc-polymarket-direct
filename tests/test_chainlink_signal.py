@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -71,3 +72,35 @@ def test_chainlink_sample_price_near_boundary(monkeypatch, tmp_path):
     assert get_chainlink_price_near("BTC", observed, max_gap_seconds=30) == 100.0
     assert get_chainlink_price_near("BTC", observed - timedelta(minutes=5), max_gap_seconds=30) is None
 
+
+def test_warm_signal_source_samples_chainlink(monkeypatch):
+    from direct_fastloop import signal
+
+    calls = []
+
+    def fake_observe(asset, **kwargs):
+        calls.append((asset, kwargs))
+        return object()
+
+    monkeypatch.setattr(signal, "observe_latest_sample", fake_observe)
+    config = SimpleNamespace(
+        asset="BTC",
+        signal_source="chainlink_primary",
+        chainlink_enabled=True,
+        chainlink_rpc_url="http://rpc.invalid",
+        chainlink_feed_address="0xfeed",
+        chainlink_max_feed_age_seconds=180,
+    )
+
+    signal.warm_signal_source(config)
+
+    assert calls == [
+        (
+            "BTC",
+            {
+                "rpc_url": "http://rpc.invalid",
+                "feed_address": "0xfeed",
+                "max_feed_age_seconds": 180,
+            },
+        )
+    ]

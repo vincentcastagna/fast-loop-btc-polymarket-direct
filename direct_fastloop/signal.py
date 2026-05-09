@@ -279,6 +279,17 @@ def get_signal_momentum(config) -> Optional[Momentum]:
     return get_binance_momentum(config.asset, config.lookback_minutes)
 
 
+def warm_signal_source(config) -> None:
+    if not (getattr(config, "chainlink_enabled", False) and _wants_chainlink(getattr(config, "signal_source", ""))):
+        return
+    observe_latest_sample(
+        config.asset,
+        rpc_url=getattr(config, "chainlink_rpc_url", None),
+        feed_address=getattr(config, "chainlink_feed_address", None),
+        max_feed_age_seconds=getattr(config, "chainlink_max_feed_age_seconds", 180),
+    )
+
+
 def get_binance_price_at(asset: str, boundary_utc: datetime) -> Optional[float]:
     """Exact market-open reference fetch: close of the candle at startTime."""
     symbol = ASSET_SYMBOLS.get(asset.upper(), "BTCUSDT")

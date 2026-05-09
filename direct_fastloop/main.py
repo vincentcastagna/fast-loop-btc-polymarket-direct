@@ -30,7 +30,7 @@ from .ledger import (
 )
 from .markets import choose_live_market, discover_fast_markets
 from .risk import check_and_size, mark_live_success
-from .signal import get_signal_momentum
+from .signal import get_signal_momentum, warm_signal_source
 from .strategy import evaluate_trade, polymarket_fee_per_share
 
 
@@ -1124,6 +1124,7 @@ def run_once(args: argparse.Namespace) -> int:
             return 2
 
     clob = DirectClob(wallet)
+    warm_signal_source(config)
     markets = discover_fast_markets(config.asset, config.window, horizon_slots=args.limit_markets)
     exit_payload = monitor_live_exit(config, clob, markets, mode, live)
     if exit_payload:
